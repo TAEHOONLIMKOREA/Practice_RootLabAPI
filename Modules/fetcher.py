@@ -1,66 +1,48 @@
 import httpx
 import json
-from typing import Optional, Tuple
-from enum import Enum
+import ast
 from .auth import AESCipher
-
-
-class Company(Enum):
-    CORP01 = "corp01"
-    CORP02 = "corp02"
-    CORP03 = "corp03"
 
 
 class DataFetcher:
     BASE_URL = "http://114.108.139.100:8500"
     AES_KEY = "3dpdx!*#$rootlabaes!&$#2025&$#%5"
 
-    def __init__(self, token: str = None, build_id: str = None, company: str = "corp01"):
+    def __init__(self, token: str = None, build_id: str = None, company: str = None):
         self.token = token
         self.build_id = build_id
         self.company = company
 
     @classmethod
-    async def login(cls, user_id: str, user_pw: str) -> Optional[str]:
-        """로그인하여 토큰 가져오기"""
+    async def login(cls, user_id: str, user_pw: str):
+        """로그인하여 토큰 반환"""
         cipher = AESCipher(cls.AES_KEY)
-        encrypted_pw = cipher.encrypt(user_pw)
-
         payload = {
             "type": "login",
             "userId": user_id,
-            "userPw": encrypted_pw
+            "userPw": cipher.encrypt(user_pw)
         }
-
         async with httpx.AsyncClient() as client:
             try:
                 resp = await client.post(f"{cls.BASE_URL}/api/info", json=payload)
-                resp.raise_for_status()
-                result = resp.json()
-                data_str = result.get("data")
-
-                if not data_str or data_str == "API Fail":
-                    print("로그인 실패: 잘못된 ID 또는 비밀번호")
+                res_json = resp.json()
+                
+                # code 200 체크
+                resp_code = int(res_json.get("code", 0))
+                if resp_code != 200:
                     return None
-
-                # JSON 파싱
-                fixed_json = data_str.replace("'", '"')
-                data = json.loads(fixed_json)
-                token = data.get("token")
-
-                if token:
-                    print("로그인 성공")
-                    return token
-                else:
-                    print("토큰을 찾을 수 없습니다")
-                    return None
-
-            except Exception as e:
-                print(f"로그인 에러: {e}")
+                
+                # data 파싱 (ast.literal_eval 사용)
+                data_field = res_json.get("data")
+                if isinstance(data_field, str) and data_field.strip().startswith("{"):
+                    data_dict = ast.literal_eval(data_field)
+                    return data_dict.get("token")
+                return None
+            except:
                 return None
 
-    async def _api_request(self, file_type: str) -> Optional[list]:
-        """API에서 파일 정보 조회"""
+    async def _request(self, file_type: str):
+        """파일 정보 조회"""
         async with httpx.AsyncClient() as client:
             try:
                 payload = {
@@ -72,84 +54,95 @@ class DataFetcher:
                     "file_type": file_type
                 }
                 resp = await client.post(f"{self.BASE_URL}/api/info", json=payload)
-                resp.raise_for_status()
                 data_str = resp.json().get("data", "[]")
-
                 if data_str == "[]":
                     return None
-
                 return json.loads(data_str.replace("'", '"'))
-            except Exception as e:
-                print(f"API error: {e}")
+            except:
                 return None
 
-    async def _download_file(self, file_sn: str) -> Optional[bytes]:
+    async def _download(self, file_sn: str):
         """파일 다운로드"""
         if not file_sn:
             return None
-
         async with httpx.AsyncClient() as client:
             try:
                 payload = {"type": "view", "token": self.token, "file_sn": file_sn}
                 resp = await client.post(f"{self.BASE_URL}/view", json=payload)
-                resp.raise_for_status()
                 return resp.content
-            except Exception as e:
-                print(f"Download error: {e}")
+            except:
                 return None
 
-    def _find_file_sn(self, data: list, pattern: str) -> Optional[str]:
-        """파일명으로 SN 검색"""
+    def _find_sn(self, data: list, layer: int):
+        """레이어에 맞는 파일 SN 검색"""
         if not data:
             return None
-
+        patterns = [f"{layer}.jpg", f"{layer}.png"]
+        if self.company == "corp03":
+            patterns.append(f"{layer}-Layer")
         for item in data:
-            file_name = item.get("orgnl_file_nm", "")
-            if pattern in file_name:
-                return item.get("file_sn")
+            name = item.get("orgnl_file_nm", "")
+            for p in patterns:
+                if p in name:
+                    return item.get("file_sn")
         return None
 
-    async def fetch_log(self) -> Optional[bytes]:
+    async def fetch_log(self):
         """로그 데이터 다운로드"""
-        data = await self._api_request("PSTTLGF")
+        data = await self._request("PSTTLGF")
         if not data:
             return None
+        return await self._download(data[0].get("file_sn"))
 
-        file_sn = data[0].get("file_sn")
-        return await self._download_file(file_sn)
-
-    async def fetch_vision(self, layer: int = 1) -> Tuple[Optional[bytes], Optional[bytes]]:
+    async def fetch_vision(self, layer: int = 1):
         """스캐닝 & 디포지션 이미지 다운로드"""
         layer = max(1, layer)
+        data_sn = await self._request("RTISN")
+        data_dp = await self._request("RTIDP")
+        scanning = await self._download(self._find_sn(data_sn, layer))
+        deposition = await self._download(self._find_sn(data_dp, layer))
+        return scanning, deposition
 
-        # 데이터 조회
-        data_sn = await self._api_request("RTISN")
-        data_dp = await self._api_request("RTIDP")
+    async def _get_table(self, table, **kwargs):
+        """테이블 데이터 조회"""
+        async with httpx.AsyncClient() as client:
+            try:
+                payload = {"type": "get", "token": self.token, "table": table}
+                payload.update(kwargs)
+                resp = await client.post(f"{self.BASE_URL}/api/info", json=payload)
+                data_str = resp.json().get("data", "[]")
+                if data_str == "[]":
+                    return []
+                return json.loads(data_str.replace("'", '"'))
+            except:
+                return []
 
-        # 스캐닝 이미지
-        scanning = None
-        if data_sn:
-            patterns = [f"{layer}.jpg", f"{layer}.png"]
-            if self.company == Company.CORP03.value:
-                patterns.append(f"{layer}-Layer")
+    async def get_machines(self):
+        """장비 목록 조회"""
+        return await self._get_table("tb_machine")
 
-            for pattern in patterns:
-                sn = self._find_file_sn(data_sn, pattern)
-                if sn:
-                    scanning = await self._download_file(sn)
-                    break
+    async def get_machine_retentions(self):
+        """보유 장비 목록 조회"""
+        return await self._get_table("tb_machine_retention")
 
-        # 디포지션 이미지
-        deposition = None
-        if data_dp:
-            patterns = [f"{layer}.jpg", f"{layer}.png"]
-            if self.company == Company.CORP03.value:
-                patterns.append(f"{layer}-Layer")
+    async def get_build_processes(self, retention_sn):
+        """BP 목록 조회"""
+        return await self._get_table("tb_build_process", retention_sn=retention_sn)
 
-            for pattern in patterns:
-                dp = self._find_file_sn(data_dp, pattern)
-                if dp:
-                    deposition = await self._download_file(dp)
-                    break
+    async def get_build_strategies(self):
+        """BS 목록 조회"""
+        return await self._get_table("tb_build_strategy")
 
-        return (scanning, deposition)
+    async def get_designs(self):
+        """디자인 목록 조회"""
+        return await self._get_table("tb_design")
+
+    async def get_materials(self):
+        """소재 목록 조회"""
+        return await self._get_table("tb_material")
+
+    async def get_files(self, table_name, table_sn, file_type):
+        """파일 목록 조회"""
+        return await self._get_table(
+            "tb_file", table_name=table_name, table_sn=table_sn, file_type=file_type
+        )

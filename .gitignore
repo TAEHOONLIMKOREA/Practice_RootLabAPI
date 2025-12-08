@@ -11,6 +11,7 @@ ENV/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # 데이터 파일
 *.csv

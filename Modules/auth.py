@@ -1,17 +1,21 @@
 import base64
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
+import hashlib
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+
+BS = 32
+pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS).encode()
 
 
 class AESCipher:
-    """AES 암호화 (C# 호환)"""
-
     def __init__(self, key: str):
-        self.key = key.encode('utf-8')[:32].ljust(32, b'\0')
+        self.key = hashlib.sha256(key.encode()).digest()
+        self.backend = default_backend()
 
-    def encrypt(self, plaintext: str) -> str:
-        """문자열 암호화"""
-        cipher = AES.new(self.key, AES.MODE_ECB)
-        padded_data = pad(plaintext.encode('utf-8'), AES.block_size)
-        encrypted = cipher.encrypt(padded_data)
-        return base64.b64encode(encrypted).decode('utf-8')
+    def encrypt(self, message: str) -> str:
+        raw = pad(message.encode())
+        iv = b"\x00" * 16
+        cipher = Cipher(algorithms.AES(self.key), modes.CBC(iv), backend=self.backend)
+        encryptor = cipher.encryptor()
+        enc = encryptor.update(raw) + encryptor.finalize()
+        return base64.b64encode(enc).decode("utf-8")

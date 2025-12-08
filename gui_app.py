@@ -2,10 +2,11 @@ import sys
 import asyncio
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox, QSpinBox, QComboBox
+    QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox, QSpinBox, QComboBox,
+    QFileDialog
 )
 from PyQt5.QtCore import QThread, pyqtSignal
-from Modules import DataFetcher, Company
+from Modules import DataFetcher, DataUploader
 
 
 class WorkerThread(QThread):
@@ -28,6 +29,8 @@ class WorkerThread(QThread):
                 result = loop.run_until_complete(self.do_login())
             elif self.task_type == "test":
                 result = loop.run_until_complete(self.do_test())
+            elif self.task_type == "upload":
+                result = loop.run_until_complete(self.do_upload())
             else:
                 result = "알 수 없는 작업"
 
@@ -96,11 +99,31 @@ class WorkerThread(QThread):
             return "\n".join(results)
 
 
+
+    async def do_upload(self):
+        """파일 업로드 수행"""
+        file_path = self.kwargs.get("file_path")
+        token = self.kwargs.get("token")
+        build_id = self.kwargs.get("build_id")
+        file_type = self.kwargs.get("file_type")
+        
+        self.progress.emit(f"업로드 중: {file_path}")
+        success = await DataUploader.upload_file(
+            file_path, token, build_id, "build_process", file_type
+        )
+        
+        if success:
+            return "SUCCESS:업로드 성공"
+        else:
+            return "FAIL:업로드 실패"
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.token = None
+        self.user_id = None
         self.worker = None
+        self.upload_file = None
         self.init_ui()
 
     def init_ui(self):
@@ -120,7 +143,6 @@ class MainWindow(QMainWindow):
         id_layout = QHBoxLayout()
         id_layout.addWidget(QLabel("ID:"))
         self.id_input = QLineEdit()
-        self.id_input.setText("corp03")
         id_layout.addWidget(self.id_input)
         login_layout.addLayout(id_layout)
 
@@ -129,7 +151,6 @@ class MainWindow(QMainWindow):
         pw_layout.addWidget(QLabel("PW:"))
         self.pw_input = QLineEdit()
         self.pw_input.setEchoMode(QLineEdit.Password)
-        self.pw_input.setText("*corp12#")
         pw_layout.addWidget(self.pw_input)
         login_layout.addLayout(pw_layout)
 
@@ -169,15 +190,6 @@ class MainWindow(QMainWindow):
         layer_layout.addWidget(self.layer_input)
         test_layout.addLayout(layer_layout)
 
-        # Company
-        company_layout = QHBoxLayout()
-        company_layout.addWidget(QLabel("Company:"))
-        self.company_input = QComboBox()
-        self.company_input.addItems(["corp01", "corp02", "corp03"])
-        self.company_input.setCurrentText("corp03")
-        company_layout.addWidget(self.company_input)
-        test_layout.addLayout(company_layout)
-
         test_group.setLayout(test_layout)
         main_layout.addWidget(test_group)
 
@@ -197,6 +209,37 @@ class MainWindow(QMainWindow):
 
         button_group.setLayout(button_layout)
         main_layout.addWidget(button_group)
+
+        
+        # 업로드 섹션
+        upload_group = QGroupBox("파일 업로드")
+        upload_layout = QVBoxLayout()
+
+        # 파일 선택
+        file_layout = QHBoxLayout()
+        self.file_label = QLabel("파일: 선택되지 않음")
+        file_layout.addWidget(self.file_label)
+        self.file_btn = QPushButton("파일 선택")
+        self.file_btn.clicked.connect(self.on_select_file)
+        file_layout.addWidget(self.file_btn)
+        upload_layout.addLayout(file_layout)
+
+        # 파일 타입 선택
+        type_layout = QHBoxLayout()
+        type_layout.addWidget(QLabel("파일 타입:"))
+        self.file_type_input = QComboBox()
+        self.file_type_input.addItems(["STTLG", "PSTTLGF", "PSTTLGS", "RTISN", "RTIDP", "MEPIG", "MEPBR"])
+        type_layout.addWidget(self.file_type_input)
+        upload_layout.addLayout(type_layout)
+
+        # 업로드 버튼
+        self.upload_btn = QPushButton("업로드")
+        self.upload_btn.clicked.connect(self.on_upload)
+        self.upload_btn.setEnabled(False)
+        upload_layout.addWidget(self.upload_btn)
+
+        upload_group.setLayout(upload_layout)
+        main_layout.addWidget(upload_group)
 
         # 결과 출력
         result_group = QGroupBox("결과")
@@ -232,6 +275,7 @@ class MainWindow(QMainWindow):
 
         if result.startswith("SUCCESS:"):
             self.token = result.split(":", 1)[1]
+            self.user_id = self.id_input.text().strip()
             self.token_label.setText(f"토큰: {self.token[:60]}...")
             self.token_label.setStyleSheet("color: green; padding: 5px;")
             self.result_text.append("✅ 로그인 성공!\n")
@@ -239,6 +283,7 @@ class MainWindow(QMainWindow):
             # 테스트 버튼 활성화
             self.log_btn.setEnabled(True)
             self.vision_btn.setEnabled(True)
+            self.upload_btn.setEnabled(True)
         else:
             self.token_label.setText("토큰: 로그인 실패")
             self.token_label.setStyleSheet("color: red; padding: 5px;")
@@ -258,7 +303,7 @@ class MainWindow(QMainWindow):
             token=self.token,
             build_id=str(self.build_input.value()),
             layer=self.layer_input.value(),
-            company=self.company_input.currentText(),
+            company=self.user_id,
             test_type="log"
         )
         self.worker.progress.connect(self.on_progress)
@@ -279,7 +324,7 @@ class MainWindow(QMainWindow):
             token=self.token,
             build_id=str(self.build_input.value()),
             layer=self.layer_input.value(),
-            company=self.company_input.currentText(),
+            company=self.user_id,
             test_type="vision"
         )
         self.worker.progress.connect(self.on_progress)
@@ -299,6 +344,48 @@ class MainWindow(QMainWindow):
     def on_progress(self, message):
         """진행 상황 업데이트"""
         self.result_text.append(f"⏳ {message}\n")
+
+
+    def on_select_file(self):
+        """파일 선택"""
+        file_path, _ = QFileDialog.getOpenFileName(self, "파일 선택")
+        if file_path:
+            self.upload_file = file_path
+            filename = file_path.replace('\\', '/').split('/')[-1]
+            self.file_label.setText(f"파일: {filename}")
+
+    def on_upload(self):
+        """업로드 버튼 클릭"""
+        if not self.token:
+            self.result_text.append("❌ 먼저 로그인하세요\n")
+            return
+        if not self.upload_file:
+            self.result_text.append("❌ 파일을 선택하세요\n")
+            return
+
+        self.upload_btn.setEnabled(False)
+        file_type = self.file_type_input.currentText()
+        self.result_text.append(f"🔄 업로드 시작: {file_type}\n")
+
+        self.worker = WorkerThread(
+            "upload",
+            file_path=self.upload_file,
+            token=self.token,
+            build_id=str(self.build_input.value()),
+            file_type=file_type
+        )
+        self.worker.progress.connect(self.on_progress)
+        self.worker.finished.connect(self.on_upload_finished)
+        self.worker.start()
+
+    def on_upload_finished(self, result):
+        """업로드 완료"""
+        self.upload_btn.setEnabled(True)
+        if result.startswith("SUCCESS:"):
+            self.result_text.append(f"✅ {result.split(':', 1)[1]}\n")
+        else:
+            self.result_text.append(f"❌ {result.split(':', 1)[1]}\n")
+        self.result_text.append("=" * 50 + "\n")
 
 
 def main():
