@@ -1,399 +1,422 @@
 import sys
-import asyncio
+import json
+import os
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox, QSpinBox, QComboBox,
-    QFileDialog
+    QFileDialog, QListWidget, QListWidgetItem
 )
-from PyQt5.QtCore import QThread, pyqtSignal
 from Modules import DataFetcher, DataUploader
 
-
-class WorkerThread(QThread):
-    """백그라운드 작업 스레드"""
-    finished = pyqtSignal(str)
-    progress = pyqtSignal(str)
-
-    def __init__(self, task_type, **kwargs):
-        super().__init__()
-        self.task_type = task_type
-        self.kwargs = kwargs
-
-    def run(self):
-        """비동기 작업 실행"""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            if self.task_type == "login":
-                result = loop.run_until_complete(self.do_login())
-            elif self.task_type == "test":
-                result = loop.run_until_complete(self.do_test())
-            elif self.task_type == "upload":
-                result = loop.run_until_complete(self.do_upload())
-            else:
-                result = "알 수 없는 작업"
-
-            self.finished.emit(result)
-        except Exception as e:
-            self.finished.emit(f"에러: {str(e)}")
-        finally:
-            loop.close()
-
-    async def do_login(self):
-        """로그인 수행"""
-        user_id = self.kwargs.get("user_id")
-        user_pw = self.kwargs.get("user_pw")
-
-        self.progress.emit(f"로그인 중: {user_id}")
-        token = await DataFetcher.login(user_id, user_pw)
-
-        if token:
-            return f"SUCCESS:{token}"
-        else:
-            return "FAIL:로그인 실패"
-
-    async def do_test(self):
-        """데이터 테스트 수행"""
-        token = self.kwargs.get("token")
-        build_id = self.kwargs.get("build_id")
-        layer = self.kwargs.get("layer")
-        company = self.kwargs.get("company")
-        test_type = self.kwargs.get("test_type")
-
-        fetcher = DataFetcher(token, build_id, company)
-
-        if test_type == "log":
-            self.progress.emit("로그 데이터 조회 중...")
-            log_data = await fetcher.fetch_log()
-
-            if log_data:
-                filename = "log_data.csv"
-                with open(filename, "wb") as f:
-                    f.write(log_data)
-                return f"로그 데이터 성공\n크기: {len(log_data)} bytes\n저장: {filename}"
-            else:
-                return "로그 데이터 조회 실패"
-
-        elif test_type == "vision":
-            self.progress.emit(f"비전 데이터 조회 중 (Layer {layer})...")
-            scanning, deposition = await fetcher.fetch_vision(layer)
-
-            results = []
-            if scanning:
-                filename = "scanning_image.jpg"
-                with open(filename, "wb") as f:
-                    f.write(scanning)
-                results.append(f"✓ 스캐닝: {len(scanning)} bytes -> {filename}")
-            else:
-                results.append("✗ 스캐닝 실패")
-
-            if deposition:
-                filename = "deposition_image.jpg"
-                with open(filename, "wb") as f:
-                    f.write(deposition)
-                results.append(f"✓ 디포지션: {len(deposition)} bytes -> {filename}")
-            else:
-                results.append("✗ 디포지션 실패")
-
-            return "\n".join(results)
-
-
-
-    async def do_upload(self):
-        """파일 업로드 수행"""
-        file_path = self.kwargs.get("file_path")
-        token = self.kwargs.get("token")
-        build_id = self.kwargs.get("build_id")
-        file_type = self.kwargs.get("file_type")
-        
-        self.progress.emit(f"업로드 중: {file_path}")
-        success = await DataUploader.upload_file(
-            file_path, token, build_id, "build_process", file_type
-        )
-        
-        if success:
-            return "SUCCESS:업로드 성공"
-        else:
-            return "FAIL:업로드 실패"
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.token = None
         self.user_id = None
-        self.worker = None
         self.upload_file = None
+        self.file_list_data = []  # 파일 목록 데이터 저장
         self.init_ui()
 
     def init_ui(self):
-        """UI 초기화"""
         self.setWindowTitle("RootLab API 테스트 도구")
-        self.setGeometry(100, 100, 700, 600)
+        self.setGeometry(100, 100, 700, 850)
 
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
 
-        # 로그인 섹션
+        # 로그인
         login_group = QGroupBox("로그인")
         login_layout = QVBoxLayout()
 
-        # ID 입력
-        id_layout = QHBoxLayout()
-        id_layout.addWidget(QLabel("ID:"))
-        self.id_input = QLineEdit()
-        id_layout.addWidget(self.id_input)
-        login_layout.addLayout(id_layout)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("ID:"))
+        self.id_input = QLineEdit("corp04")
+        row.addWidget(self.id_input)
+        login_layout.addLayout(row)
 
-        # PW 입력
-        pw_layout = QHBoxLayout()
-        pw_layout.addWidget(QLabel("PW:"))
-        self.pw_input = QLineEdit()
+        row = QHBoxLayout()
+        row.addWidget(QLabel("PW:"))
+        self.pw_input = QLineEdit("*corp12#")
         self.pw_input.setEchoMode(QLineEdit.Password)
-        pw_layout.addWidget(self.pw_input)
-        login_layout.addLayout(pw_layout)
+        row.addWidget(self.pw_input)
+        login_layout.addLayout(row)
 
-        # 로그인 버튼
-        self.login_btn = QPushButton("로그인")
-        self.login_btn.clicked.connect(self.on_login)
-        login_layout.addWidget(self.login_btn)
+        login_btn = QPushButton("로그인")
+        login_btn.clicked.connect(self.on_login)
+        login_layout.addWidget(login_btn)
 
-        # 토큰 표시
         self.token_label = QLabel("토큰: 로그인하지 않음")
-        self.token_label.setWordWrap(True)
-        self.token_label.setStyleSheet("color: red; padding: 5px;")
+        self.token_label.setStyleSheet("color: red;")
         login_layout.addWidget(self.token_label)
 
+        self.token_display = QLineEdit()
+        self.token_display.setReadOnly(True)
+        self.token_display.setPlaceholderText("로그인 후 토큰이 여기에 표시됩니다 (복사 가능)")
+        login_layout.addWidget(self.token_display)
+
         login_group.setLayout(login_layout)
-        main_layout.addWidget(login_group)
+        layout.addWidget(login_group)
 
-        # 테스트 설정 섹션
-        test_group = QGroupBox("테스트 설정")
-        test_layout = QVBoxLayout()
+        # 다운로드 설정
+        dl_group = QGroupBox("다운로드 설정")
+        dl_layout = QVBoxLayout()
 
-        # Build ID
-        build_layout = QHBoxLayout()
-        build_layout.addWidget(QLabel("Build ID:"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Build ID:"))
         self.build_input = QSpinBox()
         self.build_input.setRange(1, 100000)
         self.build_input.setValue(308)
-        build_layout.addWidget(self.build_input)
-        test_layout.addLayout(build_layout)
+        row.addWidget(self.build_input)
+        dl_layout.addLayout(row)
 
-        # Layer
-        layer_layout = QHBoxLayout()
-        layer_layout.addWidget(QLabel("Layer:"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Layer:"))
         self.layer_input = QSpinBox()
         self.layer_input.setRange(1, 1000)
         self.layer_input.setValue(1)
-        layer_layout.addWidget(self.layer_input)
-        test_layout.addLayout(layer_layout)
+        row.addWidget(self.layer_input)
+        dl_layout.addLayout(row)
 
-        test_group.setLayout(test_layout)
-        main_layout.addWidget(test_group)
+        dl_group.setLayout(dl_layout)
+        layout.addWidget(dl_group)
 
-        # 테스트 버튼 섹션
-        button_group = QGroupBox("테스트 실행")
-        button_layout = QHBoxLayout()
+        # 다운로드 버튼
+        btn_group = QGroupBox("데이터 다운로드")
+        btn_layout = QHBoxLayout()
+        log_btn = QPushButton("로그 다운로드")
+        log_btn.clicked.connect(lambda: self.on_download("log"))
+        btn_layout.addWidget(log_btn)
+        vision_btn = QPushButton("비전 다운로드")
+        vision_btn.clicked.connect(lambda: self.on_download("vision"))
+        btn_layout.addWidget(vision_btn)
+        btn_group.setLayout(btn_layout)
+        layout.addWidget(btn_group)
 
-        self.log_btn = QPushButton("로그 데이터 테스트")
-        self.log_btn.clicked.connect(self.on_test_log)
-        self.log_btn.setEnabled(False)
-        button_layout.addWidget(self.log_btn)
-
-        self.vision_btn = QPushButton("비전 데이터 테스트")
-        self.vision_btn.clicked.connect(self.on_test_vision)
-        self.vision_btn.setEnabled(False)
-        button_layout.addWidget(self.vision_btn)
-
-        button_group.setLayout(button_layout)
-        main_layout.addWidget(button_group)
-
-        
-        # 업로드 섹션
+        # 업로드
         upload_group = QGroupBox("파일 업로드")
         upload_layout = QVBoxLayout()
 
-        # 파일 선택
-        file_layout = QHBoxLayout()
+        row = QHBoxLayout()
         self.file_label = QLabel("파일: 선택되지 않음")
-        file_layout.addWidget(self.file_label)
-        self.file_btn = QPushButton("파일 선택")
-        self.file_btn.clicked.connect(self.on_select_file)
-        file_layout.addWidget(self.file_btn)
-        upload_layout.addLayout(file_layout)
+        row.addWidget(self.file_label)
+        file_btn = QPushButton("파일 선택")
+        file_btn.clicked.connect(self.on_select_file)
+        row.addWidget(file_btn)
+        upload_layout.addLayout(row)
 
-        # 파일 타입 선택
-        type_layout = QHBoxLayout()
-        type_layout.addWidget(QLabel("파일 타입:"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("파일 타입:"))
         self.file_type_input = QComboBox()
         self.file_type_input.addItems(["STTLG", "PSTTLGF", "PSTTLGS", "RTISN", "RTIDP", "MEPIG", "MEPBR"])
-        type_layout.addWidget(self.file_type_input)
-        upload_layout.addLayout(type_layout)
+        row.addWidget(self.file_type_input)
+        upload_layout.addLayout(row)
 
-        # 업로드 버튼
-        self.upload_btn = QPushButton("업로드")
-        self.upload_btn.clicked.connect(self.on_upload)
-        self.upload_btn.setEnabled(False)
-        upload_layout.addWidget(self.upload_btn)
+        upload_btn = QPushButton("업로드")
+        upload_btn.clicked.connect(self.on_upload)
+        upload_layout.addWidget(upload_btn)
 
         upload_group.setLayout(upload_layout)
-        main_layout.addWidget(upload_group)
+        layout.addWidget(upload_group)
 
-        # 결과 출력
+        # 파일 다운로드
+        file_dl_group = QGroupBox("파일 다운로드")
+        file_dl_layout = QVBoxLayout()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Table Name:"))
+        self.dl_table_name = QLineEdit("build_process")
+        row.addWidget(self.dl_table_name)
+        file_dl_layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Table SN:"))
+        self.dl_table_sn = QSpinBox()
+        self.dl_table_sn.setRange(1, 100000)
+        self.dl_table_sn.setValue(308)
+        row.addWidget(self.dl_table_sn)
+        file_dl_layout.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("File Type:"))
+        self.dl_file_type = QComboBox()
+        self.dl_file_type.addItems(["PSTTLGF", "PSTTLGS", "RTISN", "RTIDP", "STTLG", "MEPIG", "MEPBR", "AINDVI", "ADSTTLG"])
+        row.addWidget(self.dl_file_type)
+        file_dl_layout.addLayout(row)
+
+        search_btn = QPushButton("파일 검색")
+        search_btn.clicked.connect(self.on_search_files)
+        file_dl_layout.addWidget(search_btn)
+
+        self.file_list_widget = QListWidget()
+        self.file_list_widget.setMaximumHeight(100)
+        file_dl_layout.addWidget(self.file_list_widget)
+
+        download_btn = QPushButton("선택 파일 다운로드")
+        download_btn.clicked.connect(self.on_download_file)
+        file_dl_layout.addWidget(download_btn)
+
+        file_dl_group.setLayout(file_dl_layout)
+        layout.addWidget(file_dl_group)
+
+        # API 테스트
+        api_group = QGroupBox("API 테스트")
+        api_layout = QVBoxLayout()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("API:"))
+        self.api_type_input = QComboBox()
+        self.api_type_input.addItems(["machines", "retentions", "bp", "bs", "designs", "materials", "files"])
+        self.api_type_input.currentTextChanged.connect(self.on_api_type_changed)
+        row.addWidget(self.api_type_input)
+        api_layout.addLayout(row)
+
+        # BP용 Retention SN
+        self.retention_row = QHBoxLayout()
+        self.retention_row.addWidget(QLabel("Retention SN:"))
+        self.retention_sn_input = QSpinBox()
+        self.retention_sn_input.setRange(1, 100000)
+        self.retention_sn_input.setValue(1219)
+        self.retention_row.addWidget(self.retention_sn_input)
+        api_layout.addLayout(self.retention_row)
+
+        # Files용 파라미터
+        self.file_params = QVBoxLayout()
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Table Name:"))
+        self.api_table_name = QLineEdit("design")
+        row.addWidget(self.api_table_name)
+        self.file_params.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Table SN:"))
+        self.api_table_sn = QSpinBox()
+        self.api_table_sn.setRange(1, 100000)
+        self.api_table_sn.setValue(1274)
+        row.addWidget(self.api_table_sn)
+        self.file_params.addLayout(row)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("File Type:"))
+        self.api_file_type = QLineEdit("WSTSL")
+        row.addWidget(self.api_file_type)
+        self.file_params.addLayout(row)
+        api_layout.addLayout(self.file_params)
+
+        api_btn = QPushButton("API 조회")
+        api_btn.clicked.connect(self.on_api_test)
+        api_layout.addWidget(api_btn)
+
+        api_group.setLayout(api_layout)
+        layout.addWidget(api_group)
+
+        self.on_api_type_changed("machines")
+
+        # 결과
         result_group = QGroupBox("결과")
         result_layout = QVBoxLayout()
-
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
         result_layout.addWidget(self.result_text)
-
         result_group.setLayout(result_layout)
-        main_layout.addWidget(result_group)
+        layout.addWidget(result_group)
+
+    def log(self, msg):
+        self.result_text.append(msg)
 
     def on_login(self):
-        """로그인 버튼 클릭"""
         user_id = self.id_input.text().strip()
         user_pw = self.pw_input.text().strip()
-
         if not user_id or not user_pw:
-            self.result_text.append("❌ ID와 PW를 입력하세요\n")
+            self.log("❌ ID와 PW를 입력하세요\n")
             return
 
-        self.login_btn.setEnabled(False)
-        self.result_text.append(f"🔄 로그인 시도: {user_id}\n")
+        self.log(f"🔄 로그인 시도: {user_id}\n")
+        token = DataFetcher.login(user_id, user_pw)
 
-        self.worker = WorkerThread("login", user_id=user_id, user_pw=user_pw)
-        self.worker.progress.connect(self.on_progress)
-        self.worker.finished.connect(self.on_login_finished)
-        self.worker.start()
-
-    def on_login_finished(self, result):
-        """로그인 완료"""
-        self.login_btn.setEnabled(True)
-
-        if result.startswith("SUCCESS:"):
-            self.token = result.split(":", 1)[1]
-            self.user_id = self.id_input.text().strip()
-            self.token_label.setText(f"토큰: {self.token[:60]}...")
-            self.token_label.setStyleSheet("color: green; padding: 5px;")
-            self.result_text.append("✅ 로그인 성공!\n")
-
-            # 테스트 버튼 활성화
-            self.log_btn.setEnabled(True)
-            self.vision_btn.setEnabled(True)
-            self.upload_btn.setEnabled(True)
+        if token:
+            self.token = token
+            self.user_id = user_id
+            self.token_label.setText("토큰: 로그인 성공")
+            self.token_label.setStyleSheet("color: green;")
+            self.token_display.setText(token)
+            self.log("✅ 로그인 성공!\n")
         else:
             self.token_label.setText("토큰: 로그인 실패")
-            self.token_label.setStyleSheet("color: red; padding: 5px;")
-            self.result_text.append(f"❌ {result.split(':', 1)[1]}\n")
+            self.token_label.setStyleSheet("color: red;")
+            self.token_display.clear()
+            self.log("❌ 로그인 실패\n")
 
-    def on_test_log(self):
-        """로그 테스트 버튼 클릭"""
+    def on_download(self, dl_type):
         if not self.token:
-            self.result_text.append("❌ 먼저 로그인하세요\n")
+            self.log("❌ 먼저 로그인하세요\n")
             return
 
-        self.log_btn.setEnabled(False)
-        self.result_text.append("🔄 로그 데이터 테스트 시작...\n")
+        self.log(f"🔄 {dl_type} 다운로드 시작...\n")
+        fetcher = DataFetcher(self.token, str(self.build_input.value()), self.user_id)
 
-        self.worker = WorkerThread(
-            "test",
-            token=self.token,
-            build_id=str(self.build_input.value()),
-            layer=self.layer_input.value(),
-            company=self.user_id,
-            test_type="log"
-        )
-        self.worker.progress.connect(self.on_progress)
-        self.worker.finished.connect(lambda r: self.on_test_finished(r, "log"))
-        self.worker.start()
-
-    def on_test_vision(self):
-        """비전 테스트 버튼 클릭"""
-        if not self.token:
-            self.result_text.append("❌ 먼저 로그인하세요\n")
-            return
-
-        self.vision_btn.setEnabled(False)
-        self.result_text.append("🔄 비전 데이터 테스트 시작...\n")
-
-        self.worker = WorkerThread(
-            "test",
-            token=self.token,
-            build_id=str(self.build_input.value()),
-            layer=self.layer_input.value(),
-            company=self.user_id,
-            test_type="vision"
-        )
-        self.worker.progress.connect(self.on_progress)
-        self.worker.finished.connect(lambda r: self.on_test_finished(r, "vision"))
-        self.worker.start()
-
-    def on_test_finished(self, result, test_type):
-        """테스트 완료"""
-        if test_type == "log":
-            self.log_btn.setEnabled(True)
+        if dl_type == "log":
+            data = fetcher.fetch_log()
+            if data:
+                with open("log_data.csv", "wb") as f:
+                    f.write(data)
+                self.log(f"✅ 로그 다운로드 완료 ({len(data)} bytes)\n")
+            else:
+                self.log("❌ 로그 다운로드 실패\n")
         else:
-            self.vision_btn.setEnabled(True)
+            scanning, deposition = fetcher.fetch_vision(self.layer_input.value())
+            if scanning:
+                with open("scanning_image.jpg", "wb") as f:
+                    f.write(scanning)
+                self.log(f"✓ 스캐닝: {len(scanning)} bytes\n")
+            else:
+                self.log("✗ 스캐닝 실패\n")
+            if deposition:
+                with open("deposition_image.jpg", "wb") as f:
+                    f.write(deposition)
+                self.log(f"✓ 디포지션: {len(deposition)} bytes\n")
+            else:
+                self.log("✗ 디포지션 실패\n")
 
-        self.result_text.append(f"📊 결과:\n{result}\n")
-        self.result_text.append("=" * 50 + "\n")
-
-    def on_progress(self, message):
-        """진행 상황 업데이트"""
-        self.result_text.append(f"⏳ {message}\n")
-
+        self.log("=" * 50 + "\n")
 
     def on_select_file(self):
-        """파일 선택"""
-        file_path, _ = QFileDialog.getOpenFileName(self, "파일 선택")
-        if file_path:
-            self.upload_file = file_path
-            filename = file_path.replace('\\', '/').split('/')[-1]
-            self.file_label.setText(f"파일: {filename}")
+        path, _ = QFileDialog.getOpenFileName(self, "파일 선택")
+        if path:
+            self.upload_file = path
+            self.file_label.setText(f"파일: {os.path.basename(path)}")
 
     def on_upload(self):
-        """업로드 버튼 클릭"""
         if not self.token:
-            self.result_text.append("❌ 먼저 로그인하세요\n")
+            self.log("❌ 먼저 로그인하세요\n")
             return
         if not self.upload_file:
-            self.result_text.append("❌ 파일을 선택하세요\n")
+            self.log("❌ 파일을 선택하세요\n")
             return
 
-        self.upload_btn.setEnabled(False)
         file_type = self.file_type_input.currentText()
-        self.result_text.append(f"🔄 업로드 시작: {file_type}\n")
+        self.log(f"🔄 업로드 시작: {file_type}\n")
 
-        self.worker = WorkerThread(
-            "upload",
-            file_path=self.upload_file,
-            token=self.token,
-            build_id=str(self.build_input.value()),
-            file_type=file_type
+        success = DataUploader.upload_file(
+            self.upload_file, self.token, str(self.build_input.value()), "build_process", file_type
         )
-        self.worker.progress.connect(self.on_progress)
-        self.worker.finished.connect(self.on_upload_finished)
-        self.worker.start()
+        self.log("✅ 업로드 성공\n" if success else "❌ 업로드 실패\n")
+        self.log("=" * 50 + "\n")
 
-    def on_upload_finished(self, result):
-        """업로드 완료"""
-        self.upload_btn.setEnabled(True)
-        if result.startswith("SUCCESS:"):
-            self.result_text.append(f"✅ {result.split(':', 1)[1]}\n")
+    def on_api_type_changed(self, api_type):
+        show_retention = api_type == "bp"
+        for i in range(self.retention_row.count()):
+            w = self.retention_row.itemAt(i).widget()
+            if w:
+                w.setVisible(show_retention)
+
+        show_files = api_type == "files"
+        for i in range(self.file_params.count()):
+            item = self.file_params.itemAt(i).layout()
+            if item:
+                for j in range(item.count()):
+                    w = item.itemAt(j).widget()
+                    if w:
+                        w.setVisible(show_files)
+
+    def on_api_test(self):
+        if not self.token:
+            self.log("❌ 먼저 로그인하세요\n")
+            return
+
+        api_type = self.api_type_input.currentText()
+        self.log(f"🔄 API 조회: {api_type}\n")
+
+        fetcher = DataFetcher(self.token)
+        if api_type == "machines":
+            data = fetcher.get_machines()
+        elif api_type == "retentions":
+            data = fetcher.get_machine_retentions()
+        elif api_type == "bp":
+            data = fetcher.get_build_processes(self.retention_sn_input.value())
+        elif api_type == "bs":
+            data = fetcher.get_build_strategies()
+        elif api_type == "designs":
+            data = fetcher.get_designs()
+        elif api_type == "materials":
+            data = fetcher.get_materials()
+        elif api_type == "files":
+            data = fetcher.get_files(self.api_table_name.text(), self.api_table_sn.value(), self.api_file_type.text())
         else:
-            self.result_text.append(f"❌ {result.split(':', 1)[1]}\n")
-        self.result_text.append("=" * 50 + "\n")
+            data = None
+
+        if data:
+            self.log(f"조회 성공 ({len(data)}건)\n{json.dumps(data, indent=2, ensure_ascii=False)}\n")
+        else:
+            self.log("데이터 없음\n")
+        self.log("=" * 50 + "\n")
+
+    def on_search_files(self):
+        if not self.token:
+            self.log("❌ 먼저 로그인하세요\n")
+            return
+
+        table_name = self.dl_table_name.text().strip()
+        table_sn = self.dl_table_sn.value()
+        file_type = self.dl_file_type.currentText()
+
+        self.log(f"🔄 파일 검색: {table_name}, {table_sn}, {file_type}\n")
+
+        fetcher = DataFetcher(self.token)
+        data = fetcher.get_files(table_name, table_sn, file_type)
+
+        self.file_list_widget.clear()
+        self.file_list_data = []
+
+        if data and isinstance(data, list):
+            self.file_list_data = data
+            for item in data:
+                file_name = item.get("orgnl_file_nm", "알 수 없음")
+                file_sn = item.get("file_sn", "")
+                list_item = QListWidgetItem(f"{file_name} (SN: {file_sn})")
+                self.file_list_widget.addItem(list_item)
+            self.log(f"✅ {len(data)}개 파일 발견\n")
+        else:
+            self.log("❌ 파일 없음\n")
+
+        self.log("=" * 50 + "\n")
+
+    def on_download_file(self):
+        if not self.token:
+            self.log("❌ 먼저 로그인하세요\n")
+            return
+
+        selected = self.file_list_widget.currentRow()
+        if selected < 0 or selected >= len(self.file_list_data):
+            self.log("❌ 다운로드할 파일을 선택하세요\n")
+            return
+
+        file_info = self.file_list_data[selected]
+        file_sn = file_info.get("file_sn")
+        file_name = file_info.get("orgnl_file_nm", "downloaded_file")
+
+        self.log(f"🔄 다운로드 시작: {file_name}\n")
+
+        fetcher = DataFetcher(self.token)
+        data = fetcher._download(file_sn)
+
+        if data:
+            save_path, _ = QFileDialog.getSaveFileName(self, "파일 저장", file_name)
+            if save_path:
+                with open(save_path, "wb") as f:
+                    f.write(data)
+                self.log(f"✅ 다운로드 완료: {save_path} ({len(data)} bytes)\n")
+            else:
+                self.log("❌ 저장 취소됨\n")
+        else:
+            self.log("❌ 다운로드 실패\n")
+
+        self.log("=" * 50 + "\n")
 
 
-def main():
+if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()
